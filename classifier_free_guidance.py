@@ -1,34 +1,25 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-import numpy as np
-import imageio
 from tqdm import tqdm
 import contextlib
 
+from unet import UNet
+
 
 class CFGDiffusion(nn.Module):
-    def get_linear_beta_schdule(self):
-        self.beta = torch.linspace(
-            self.init_beta,
-            self.fin_beta,
-            self.n_diffusion_steps,
-            device=self.device,
-        )
-
     def __init__(
         self,
-        model,
+        net,
         img_size,
         device,
         min_lamb=-20, # "$\lambda_{\text{min}}$"
         max_lamb=20, # "$\lambda_{\text{max}}$"
-        interpolation_coeff=0.3, # "$v$"
+        interpol_coeff=0.3, # "$v$"
         uncond_prob=0.1,
+        guidance_str=0.1,
         image_channels=3,
         n_diffusion_steps=1000,
-        init_beta=0.0001,
-        fin_beta=0.02,
     ):
         # "We sample $\lambda$ via \lambda = -2\log\tan(au + b) for uniformly distributed $u \in [0, 1]$,
         # where $b = \arctan(e^{-\lambda_{\text{max}} / 2})$
@@ -37,21 +28,26 @@ class CFGDiffusion(nn.Module):
 
         self.img_size = img_size
         self.device = device
+        self.min_lambda = min_lamb
+        self.max_lambda = max_lamb
+        self.interpol_coeff = interpol_coeff
+        self.uncond_prob = uncond_prob
+        self.guidance_str = guidance_str
         self.image_channels = image_channels
         self.n_diffusion_steps = n_diffusion_steps
-        self.init_beta = init_beta
-        self.fin_beta = fin_beta
 
-        self.model = model.to(device)
+        self.net = net.to(device)
 
-        self.get_linear_beta_schdule()
-        self.alpha = 1 - self.beta
-        self.alpha_bar = torch.cumprod(self.alpha, dim=0)
-        
-        # min_lamb=-20
-        # max_lamb=20
-        self.b = torch.arctan(torch.exp(torch.tensor(-max_lamb / 2)))
-        self.a = torch.arctan(torch.exp(torch.tensor(-min_lamb / 2))) - self.b
+        self.diffusion_step = torch.linspace(
+            min_lamb, max_lamb, n_diffusion_steps, device=self.device,
+        )
+
+        self.b = torch.arctan(
+            torch.exp(torch.tensor(-max_lamb / 2, device=self.device))
+        )
+        self.a = torch.arctan(
+            torch.exp(torch.tensor(-min_lamb / 2, device=self.device))
+        ) - self.b
 
     def sample_noise(self, batch_size):
         """
@@ -94,6 +90,7 @@ class CFGDiffusion(nn.Module):
 
     def perform_diffusion_process(self, ori_image, lamb, rand_noise=None):
         """
+        "$q(\mathbf{z}_{\lambda} \vert \mathbf{x}) = \mathcal{N}(\alpha_{\lambda}\mathbf{x}, \sigma^{2}_{\lambda}\mathbf{I})$"
         "$\mathbf{z}_{\lambda} = \alpha_{\lambda}\mathbf{x} + \sigma_{\lambda}\mathbf{\epsilon}$"
         """
         signal_ratio = self.lambda_to_signal_ratio(lamb)
@@ -104,8 +101,30 @@ class CFGDiffusion(nn.Module):
             rand_noise = self.sample_noise(batch_size=ori_image.size(0))
         return mean + (var ** 0.5) * rand_noise
 
-    def forward(self, noisy_image, lamb):
-        return self.model(noisy_image=noisy_image, lamb=lamb)
+    def batchify_diffusion_steps(self, diffusion_step_idx, batch_size):
+        return torch.full(
+            size=(batch_size,),
+            fill_value=diffusion_step_idx,
+            dtype=torch.long,
+            device=self.device,
+        )
+
+    def forward(self, noisy_image, diffusion_step, label):
+        return self.unet(
+            noisy_image=noisy_image, diffusion_step=diffusion_step, label=label,
+        )
+
+    def predict_noise(self, noisy_image, diffusion_step_idx, label):
+        diffusion_step = self.batchify_diffusion_steps(
+            diffusion_step_idx=diffusion_step_idx, batch_size=noisy_image.size(0),
+        )
+        pred_noise_cond = self(
+            noisy_image=noisy_image, diffusion_step=diffusion_step, label=label,
+        )
+        pred_noise_uncond = self(
+            noisy_image=noisy_image, diffusion_step=diffusion_step, label=,
+        )
+        return (1 + self.guidance_str) * pred_noise_cond - self.guidance_str * pred_noise_uncond
 
     def get_loss(self, ori_image):
         """
@@ -121,57 +140,83 @@ class CFGDiffusion(nn.Module):
         with torch.autocast(
             device_type=self.device.type, dtype=torch.float16,
         ) if self.device.type == "cuda" else contextlib.nullcontext():
-            pred_noise = self(noisy_image=noisy_image, lamb=rand_lamb)
+            pred_noise = self.predict_noise(noisy_image=noisy_image, lamb=rand_lamb)
             return F.mse_loss(pred_noise, rand_noise, reduction="mean")
 
     @torch.inference_mode()
-    def take_denoising_step(self, noisy_image, diffusion_step_idx):
-        diffusion_step = self.batchify_diffusion_steps(
-            diffusion_step_idx=diffusion_step_idx, batch_size=noisy_image.size(0),
-        )
-        alpha_t = self.index(self.alpha, diffusion_step=diffusion_step)
-        beta_t = self.index(self.beta, diffusion_step=diffusion_step)
-        alpha_bar_t = self.index(self.alpha_bar, diffusion_step=diffusion_step)
-        pred_noise = self(noisy_image=noisy_image.detach(), diffusion_step=diffusion_step)
-        model_mean = (1 / (alpha_t ** 0.5)) * (
-            noisy_image - ((beta_t / ((1 - alpha_bar_t) ** 0.5)) * pred_noise)
-        )
-        model_var = beta_t
-
-        if diffusion_step_idx > 0:
-            z_min_lamb = self.sample_noise(batch_size=noisy_image.size(0))
-        else:
-            z_min_lamb = torch.zeros(
-                size=(noisy_image.size(0), self.image_channels, self.img_size, self.img_size),
-                device=self.device,
-            )
-        return model_mean + (model_var ** 0.5) * z_min_lamb
-
-    def perform_denoising_process(self, noisy_image, start_diffusion_step_idx, n_frames=None):
+    def predict_ori_image(self, noisy_image, noise, signal_ratio, noise_ratio):
         """
-        "$p_{\theta}(z_{\lambda'} \vert z_{\lambda})$"
+        "$\mathbf{x}_{\theta}(\mathbf{z}_{\lambda}) = (\mathbf{z}_{\lambda} - \sigma_{\lambda}\mathbf{\epsilon}_{\theta}(\mathbf{z}_{\lambda})) / \alpha_{\lambda}$"
         """
-        if n_frames is not None:
-            frames = list()
+        return (noisy_image - (noise_ratio ** 0.5) * noise) / (signal_ratio ** 0.5)
 
+    @torch.inference_mode()
+    def take_denoising_step(self, noisy_image, diffusion_step_idx, label):
+        """
+        "$p_{\theta}(\mathbf{z}_{\lambda'} \vert z_{\lambda})$"
+        """
+        lamb1 = self.diffusion_step[diffusion_step_idx]
+        lamb2 = self.diffusion_step[diffusion_step_idx - 1]
+
+        signal_ratio1 = self.lambda_to_signal_ratio(lamb1)
+        noise_ratio1 = self.signal_ratio_to_noise_ratio(signal_ratio1)
+        pred_noise = self.predict_noise(
+            noisy_image=noisy_image, diffusion_step_idx=diffusion_step_idx, label=label.to(self.device),
+        )
+        pred_ori_image  = self.predict_ori_image(
+            noisy_image=noisy_image,
+            noise=pred_noise,
+            signal_ratio=signal_ratio1,
+            noise_ratio=noise_ratio1,
+        )
+
+        signal_ratio2 = self.lambda_to_signal_ratio(lamb2)
+        exp_lamb12 = torch.exp(lamb1 - lamb2)
+        # "$\tilde{\mathbf{\mu}}_{\lambda' \vert \lambda}(\mathbf{z}_{\lambda}, \mathbf{x}) = e^{\lambda - \lambda'}(\alpha_{\lambda'}/\alpha_{\lambda})\mathbf{z}_{\lambda} + (1 - e^{\lambda - \lambda'})\alpha_{\lambda'}\mathbf{x}$"
+        model_mean = exp_lamb12 * (
+            (signal_ratio2 ** 0.5) / (signal_ratio1 ** 0.5)
+        ) * noisy_image + (1 - exp_lamb12) * (signal_ratio2 ** 0.5) * pred_ori_image
+
+        noise_ratio2 = self.signal_ratio_to_noise_ratio(signal_ratio2)
+        sigma_square21 = (1 - exp_lamb12) * noise_ratio2
+        sigma_square12 = (1 - exp_lamb12) * noise_ratio1
+        model_var = (sigma_square21 ** (
+            1 - self.interpol_coeff
+        )) * (sigma_square12 ** self.interpol_coeff)
+        return model_mean + (model_var ** 0.5) * noisy_image
+
+    def perform_denoising_process(self, noisy_image, start_diffusion_step_idx, label):
         x = noisy_image
-        pbar = tqdm(range(start_diffusion_step_idx, -1, -1), leave=False)
+        pbar = tqdm(range(start_diffusion_step_idx, 0, -1), leave=False)
         for diffusion_step_idx in pbar:
             pbar.set_description("Denoising...")
 
-            x = self.take_denoising_step(x, diffusion_step_idx=diffusion_step_idx)
+            x = self.take_denoising_step(
+                noisy_image=x, diffusion_step_idx=diffusion_step_idx, label=label,
+            )
+        return x
 
-            if n_frames is not None and (
-                diffusion_step_idx % (self.n_diffusion_steps // n_frames) == 0
-            ):
-                frames.append(self._get_frame(x))
-        return frames if n_frames is not None else x
-
-    def sample(self, batch_size):
+    def sample(self, label):
         # "$p_{\theta}(z_{\lambda_{\text{min}}}) = \mathcal{N}(0, I)$"
-        z_min_lamb = self.sample_noise(batch_size=batch_size)
+        z_min_lamb = self.sample_noise(batch_size=label.size(0))
         return self.perform_denoising_process(
             noisy_image=z_min_lamb,
             start_diffusion_step_idx=self.n_diffusion_steps - 1,
-            n_frames=None,
+            label=label,
         )
+
+
+if __name__ == "__main__":
+    N_CLASSES = 10
+    IMG_SIZE = 32
+    DEVICE = torch.device("mps")
+    net = UNet(n_classes=N_CLASSES)
+    model = CFGDiffusion(
+        net=net,
+        img_size=IMG_SIZE,
+        device=DEVICE,
+    )
+
+    BATCH_SIZE = 1
+    LABEL = torch.randint(0, N_CLASSES, size=(BATCH_SIZE,))
+    model.sample(label=LABEL)
