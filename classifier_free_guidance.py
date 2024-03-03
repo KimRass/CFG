@@ -8,18 +8,25 @@ from unet import UNet
 
 
 class CFGDiffusion(nn.Module):
+    """
+    Args:
+        min_lamb: "$\lambda_{\text{min}}$"
+        max_lamb: "$\lambda_{\text{max}}$"
+        interpol_coeff: "$v$"
+        n_diffusion_steps: "$T = 256$ attains a good balance between sample quality and sampling speed."
+    """
     def __init__(
         self,
         net,
         img_size,
         device,
-        min_lamb=-20, # "$\lambda_{\text{min}}$"
-        max_lamb=20, # "$\lambda_{\text{max}}$"
-        interpol_coeff=0.3, # "$v$"
+        min_lamb=-20,
+        max_lamb=20,
+        interpol_coeff=0.3,
         uncond_prob=0.1,
         guidance_str=0.1,
         image_channels=3,
-        n_diffusion_steps=1000,
+        n_diffusion_steps=256,
     ):
         # "We sample $\lambda$ via \lambda = -2\log\tan(au + b) for uniformly distributed $u \in [0, 1]$,
         # where $b = \arctan(e^{-\lambda_{\text{max}} / 2})$
@@ -38,6 +45,9 @@ class CFGDiffusion(nn.Module):
 
         self.net = net.to(device)
 
+        # "For finite timestep generation, we use $\lambda$ values
+        # corresponding to uniformly spaced $u \in [0, 1]$,
+        # and the final generated sample is $\mathbf{x}_{\theta}(\mathbf{z}_{\lambda_{\text{max}}})$."
         self.diffusion_step = torch.linspace(
             min_lamb, max_lamb, n_diffusion_steps, device=self.device,
         )
@@ -122,7 +132,7 @@ class CFGDiffusion(nn.Module):
             noisy_image=noisy_image, diffusion_step=diffusion_step, label=label,
         )
         pred_noise_uncond = self(
-            noisy_image=noisy_image, diffusion_step=diffusion_step, label=,
+            noisy_image=noisy_image, diffusion_step=diffusion_step, label=None,
         )
         return (1 + self.guidance_str) * pred_noise_cond - self.guidance_str * pred_noise_uncond
 
@@ -140,7 +150,7 @@ class CFGDiffusion(nn.Module):
         with torch.autocast(
             device_type=self.device.type, dtype=torch.float16,
         ) if self.device.type == "cuda" else contextlib.nullcontext():
-            pred_noise = self.predict_noise(noisy_image=noisy_image, lamb=rand_lamb)
+            pred_noise = self(noisy_image=noisy_image, lamb=rand_lamb)
             return F.mse_loss(pred_noise, rand_noise, reduction="mean")
 
     @torch.inference_mode()

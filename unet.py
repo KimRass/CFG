@@ -200,28 +200,32 @@ class UNet(nn.Module):
             nn.Conv2d(cur_channels, 3, 3, 1, 1)
         )
 
-    def forward(self, noisy_image, diffusion_step, label):
+    def forward(self, noisy_image, diffusion_step, label=None):
         x = self.init_conv(noisy_image)
         t = self.time_embed(diffusion_step)
-        y = self.label_emb(label)
+        if label is not None:
+            y = self.label_emb(label)
+            c = t + y
+        else:
+            c = t
 
         xs = [x]
         for layer in self.down_blocks:
             if isinstance(layer, Downsample):
                 x = layer(x)
             else:
-                x = layer(x, t + y)
+                x = layer(x, c)
             xs.append(x)
 
         for layer in self.mid_blocks:
-            x = layer(x, t + y)
+            x = layer(x, c)
 
         for layer in self.up_blocks:
             if isinstance(layer, Upsample):
                 x = layer(x)
             else:
                 x = torch.cat([x, xs.pop()], dim=1)
-                x = layer(x, t + y)
+                x = layer(x, c)
         assert len(xs) == 0
         return self.fin_block(x)
 
