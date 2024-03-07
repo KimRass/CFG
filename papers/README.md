@@ -1,6 +1,8 @@
 - Auxiliary classifier 없이 Low-temperature sampling을 하고자 합니다.
 
 # 기존 연구
+- Low-temperature sampling:
+    - Truncation trick
 - Classifier guidance
 
 # Classifier-Free Guidance
@@ -12,3 +14,4 @@
 - $\lambda$가 증가하는 방향
 - $p_{\theta}$
 - $\epsilon_{\theta}(z_{\lambda})$: Model
+- Constant model variance like in DDPM.

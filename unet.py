@@ -139,7 +139,7 @@ class UNet(nn.Module):
             Swish(),
             nn.Linear(time_channels, time_channels),
         )
-        self.label_emb = nn.Embedding(n_classes, time_channels)
+        self.label_embed = nn.Embedding(n_classes, time_channels)
 
         self.init_conv = nn.Conv2d(3, channels, 3, 1, 1)
         self.down_blocks = nn.ModuleList()
@@ -204,7 +204,7 @@ class UNet(nn.Module):
         x = self.init_conv(noisy_image)
         t = self.time_embed(diffusion_step)
         if label is not None:
-            y = self.label_emb(label)
+            y = self.label_embed(label)
             c = t + y
         else:
             c = t

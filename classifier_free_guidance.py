@@ -100,8 +100,10 @@ class CFGDiffusion(nn.Module):
 
     def perform_diffusion_process(self, ori_image, lamb, rand_noise=None):
         """
-        "$q(\mathbf{z}_{\lambda} \vert \mathbf{x}) = \mathcal{N}(\alpha_{\lambda}\mathbf{x}, \sigma^{2}_{\lambda}\mathbf{I})$"
-        "$\mathbf{z}_{\lambda} = \alpha_{\lambda}\mathbf{x} + \sigma_{\lambda}\mathbf{\epsilon}$"
+        "$q(\mathbf{z}_{\lambda} \vert \mathbf{x})
+        = \mathcal{N}(\alpha_{\lambda}\mathbf{x}, \sigma^{2}_{\lambda}\mathbf{I})$"
+        "$\mathbf{z}_{\lambda}
+        = \alpha_{\lambda}\mathbf{x} + \sigma_{\lambda}\mathbf{\epsilon}$"
         """
         signal_ratio = self.lambda_to_signal_ratio(lamb)
         noise_ratio = self.signal_ratio_to_noise_ratio(signal_ratio)
@@ -138,7 +140,8 @@ class CFGDiffusion(nn.Module):
 
     def get_loss(self, ori_image):
         """
-        "Take gradient step on $\nabla_{\theta}\Vert\mathbf{\epsilon}(\mathbf{z}_{\lambda}, c) - \mathbf{\epsilon}\Vert^{2}$"
+        "Take gradient step on
+        $\nabla_{\theta}\Vert\mathbf{\epsilon}(\mathbf{z}_{\lambda}, c) - \mathbf{\epsilon}\Vert^{2}$"
         """
         # "Algorithm 1-4; $\lambda \sim p(\lambda)$"
         rand_lamb = self.sample_lambda(batch_size=ori_image.size(0))
@@ -156,7 +159,8 @@ class CFGDiffusion(nn.Module):
     @torch.inference_mode()
     def predict_ori_image(self, noisy_image, noise, signal_ratio, noise_ratio):
         """
-        "$\mathbf{x}_{\theta}(\mathbf{z}_{\lambda}) = (\mathbf{z}_{\lambda} - \sigma_{\lambda}\mathbf{\epsilon}_{\theta}(\mathbf{z}_{\lambda})) / \alpha_{\lambda}$"
+        "$\mathbf{x}_{\theta}(\mathbf{z}_{\lambda})
+        = (\mathbf{z}_{\lambda} - \sigma_{\lambda}\mathbf{\epsilon}_{\theta}(\mathbf{z}_{\lambda})) / \alpha_{\lambda}$"
         """
         return (noisy_image - (noise_ratio ** 0.5) * noise) / (signal_ratio ** 0.5)
 
@@ -197,7 +201,7 @@ class CFGDiffusion(nn.Module):
 
     def perform_denoising_process(self, noisy_image, start_diffusion_step_idx, label):
         x = noisy_image
-        pbar = tqdm(range(start_diffusion_step_idx, 0, -1), leave=False)
+        pbar = tqdm(range(start_diffusion_step_idx, self.n_diffusion_steps, -1), leave=False)
         for diffusion_step_idx in pbar:
             pbar.set_description("Denoising...")
 
