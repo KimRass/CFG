@@ -130,6 +130,8 @@ class UNet(nn.Module):
     ):
         super().__init__()
 
+        self.n_classes = n_classes
+
         assert all([i < len(channel_mults) for i in attns]), "attns index out of bound"
 
         time_channels = channels * 4
@@ -139,7 +141,7 @@ class UNet(nn.Module):
             Swish(),
             nn.Linear(time_channels, time_channels),
         )
-        self.label_embed = nn.Embedding(n_classes, time_channels)
+        self.label_embed = nn.Embedding(n_classes + 1, time_channels)
 
         self.init_conv = nn.Conv2d(3, channels, 3, 1, 1)
         self.down_blocks = nn.ModuleList()
@@ -200,14 +202,14 @@ class UNet(nn.Module):
             nn.Conv2d(cur_channels, 3, 3, 1, 1)
         )
 
-    def forward(self, noisy_image, diffusion_step, label=None):
+    def forward(self, noisy_image, diffusion_step, label="null"):
         x = self.init_conv(noisy_image)
         t = self.time_embed(diffusion_step)
-        if label is not None:
-            y = self.label_embed(label)
-            c = t + y
+        if label == "null":
+            y = self.label_embed(self.n_classes)
         else:
-            c = t
+            y = self.label_embed(label)
+        c = t + y
 
         xs = [x]
         for layer in self.down_blocks:
